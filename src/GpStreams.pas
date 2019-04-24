@@ -4,7 +4,7 @@
 
 This software is distributed under the BSD license.
 
-Copyright (c) 2016, Primoz Gabrijelcic
+Copyright (c) 2018, Primoz Gabrijelcic
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification,
@@ -30,10 +30,20 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
    Author            : Primoz Gabrijelcic
    Creation date     : 2006-09-21
-   Last modification : 2016-02-03
-   Version           : 1.48
+   Last modification : 2018-03-14
+   Version           : 1.50b
 </pre>*)(*
    History:
+     1.51b: 2018-03-14
+       - TGpJoinedStream.Read and TGpJoinedStream.Write would crash when
+         stream was larger than MaxInt.
+     1.50a: 2017-06-19
+       - SafeCreateGpFileStream correctly handles `fmCreate` mode.
+     1.50: 2017-05-18
+       - Implemented TGpStreamEnhancer.Advance.
+     1.49: 2017-03-22
+       - Implemented TRawByteStringStream.
+       - Implemented TGpStreamEnhancer.WriteRawStr.
      1.48: 2016-02-03
        - AppendToFile opens file with fmShareDenyWrite to allow simultaneous reading.
      1.47a: 2015-11-09
@@ -403,6 +413,24 @@ type
     property DataString: AnsiString read FDataString;
   end; { TAnsiStringStream }
 
+  {:RawByteString-based implementation of TStringStream, used for UTF-8 processing.
+  }
+  TRawByteStringStream = class(TStream)
+  private
+    FDataString: RawByteString;
+    FPosition  : Integer;
+  protected
+    procedure SetSize(newSize: longint); override;
+  public
+    constructor Create(const value: RawByteString);
+    function  Read(var buffer; count: longint): longint; override;
+    function  ReadString(count: longint): RawByteString;
+    function  Seek(offset: longint; origin: word): longint; override;
+    function  Write(const buffer; count: longint): longint; override;
+    procedure WriteString(const value: RawByteString);
+    property DataString: RawByteString read FDataString;
+  end; { TRawByteStringStream }
+
   IGpStreamWrapper = interface['{12735720-9247-42D4-A911-D23AD8D2B03D}']
     function  GetStream: TStream;
     procedure Restore;
@@ -473,6 +501,7 @@ type
     procedure SkipTag;
     // Text file emulator
     procedure WriteAnsiStr(const s: AnsiString);  {$IFDEF GpStreams_Inline}inline;{$ENDIF}
+    procedure WriteRawStr(const s: RawByteString);{$IFDEF GpStreams_Inline}inline;{$ENDIF}
     procedure WriteStr(const s: string);          {$IFDEF GpStreams_Inline}inline;{$ENDIF}
     procedure WriteWideStr(const s: WideString);  {$IFDEF GpStreams_Inline}inline;{$ENDIF}
     procedure Writeln(const s: string = '');      {$IFDEF GpStreams_Inline}inline;{$ENDIF}
@@ -482,6 +511,7 @@ type
     procedure RemoveFirst(numBytes: integer);
     procedure KeepLast(numBytes: integer);        {$IFDEF GpStreams_Inline}inline;{$ENDIF}
     // Other helpers
+    procedure Advance(deltaPosition: int64);      {$IFDEF GpStreams_Inline}inline;{$ENDIF}
     procedure Append(source: TStream);            {$IFDEF GpStreams_Inline}inline;{$ENDIF}
     function  AtEnd: boolean;                     {$IFDEF GpStreams_Inline}inline;{$ENDIF}
     function  BytesLeft: int64;
@@ -802,7 +832,10 @@ var
 begin
   startTime := DSiTimeGetTime64;
   repeat
-    handle := THandle(FileOpen(fileName, mode));
+    if mode = fmCreate then
+      handle := THandle(FileCreate(fileName))
+    else
+      handle := THandle(FileOpen(fileName, mode));
     if (handle <> INVALID_HANDLE_VALUE) or (GetLastError <> ERROR_SHARING_VIOLATION) or
         DSiHasElapsed(startTime, waitUpTo_ms)
     then
@@ -1193,12 +1226,12 @@ begin
   ssSpanList.Find(firstPos, idxSpan);
   if idxSpan > 0 then
     if firstPos <= Span[idxSpan-1].LastPos then
-      raise Exception.CreateFmt(
+      raise EStreamError.CreateFmt(
         'TGpScatteredStream.AddSpan: Span (%d,%d) overlaps with span (%d,%d)',
         [firstPos, lastPos, Span[idxSpan-1].FirstPos, Span[idxSpan-1].LastPos]);
   if idxSpan < (CountSpans - 1) then
     if lastPos >= Span[idxSpan+1].FirstPos then
-      raise Exception.CreateFmt(
+      raise EStreamError.CreateFmt(
         'TGpScatteredStream.AddSpan: Span (%d,%d) overlaps with span (%d,%d)',
         [firstPos, lastPos, Span[idxSpan+1].FirstPos, Span[idxSpan+1].LastPos]);
   newSpan := ssSpanClass.Create(firstPos, lastPos);
@@ -1226,7 +1259,7 @@ end; { TGpScatteredStream.CumulativeSize }
 function TGpScatteredStream.GetSize: int64;
 begin
   if ssoDataOnDemand in Options then
-    raise Exception.Create('TGpScatteredStream.GetSize: Cannot calculate size for on-demand scattered stream')
+    raise EStreamError.Create('TGpScatteredStream.GetSize: Cannot calculate size for on-demand scattered stream')
   else if CountSpans <= 0 then
     Result := 0
   else
@@ -1247,7 +1280,7 @@ begin
   else begin
     ssSpanIdx := LocateCumulativeOffset(offset);
     if ssSpanIdx < 0 then
-      raise Exception.CreateFmt('TGpScatteredStream.InternalSeek: Seek offset %d out of range', [offset]);
+      raise EStreamError.CreateFmt('TGpScatteredStream.InternalSeek: Seek offset %d out of range', [offset]);
     ssSpanOffset := offset - Span[ssSpanIdx].CumulativeOffset;
   end;
   ssCurrentPos := offset;
@@ -1523,8 +1556,8 @@ begin
   if jsStreamList.Count = 1 then
     jsStartOffsets.Add(0)
   else begin
-    jsStartOffsets.Add(jsStartOffsets[StreamCount-2] + Stream[StreamCount-2].Size);
-    Inc(jsButLastSize, Stream[StreamCount-2].Size); 
+    jsButLastSize := jsStartOffsets[StreamCount-2] + Stream[StreamCount-2].Size;
+    jsStartOffsets.Add(jsButLastSize);
   end;
 end; { TGpJoinedStream.AddStream }
 
@@ -1587,7 +1620,7 @@ end; { TGpJoinedStream.LocateCumulativeOffset }
 
 function TGpJoinedStream.Read(var buffer; count: integer): integer;
 var
-  dataRead: integer;
+  dataRead: int64;
   pBuf    : PAnsiChar;
 begin
   Result := 0;
@@ -1643,13 +1676,13 @@ begin
     else // last stream, move after the end of the previous stream
       Position := jsStartOffsets[streamIdx];
   end;
-  jsButLastSize := 0;
-  for iStream := 0 to StreamCount - 2 do
-    Inc(jsButLastSize, Stream[iStream].Size);
   with KeepStreamPosition(Self) do begin
     jsStreamList.Delete(streamIdx);
     jsStartOffsets.Delete(streamIdx);
   end;
+  jsButLastSize := 0;
+  for iStream := 0 to StreamCount - 2 do
+    Inc(jsButLastSize, Stream[iStream].Size);
 end; { TGpJoinedStream.RemoveStream }
 
 function TGpJoinedStream.Seek(const offset: int64; origin: TSeekOrigin): int64;
@@ -1671,7 +1704,7 @@ end; { TGpJoinedStream.StreamCount }
 
 function TGpJoinedStream.Write(const buffer; count: integer): integer;
 var
-  dataWritten: integer;
+  dataWritten: int64;
   pBuf       : PAnsiChar;
 begin
   Result := 0;
@@ -1702,6 +1735,11 @@ end; { TGpJoinedStream.Write }
 
 {$IFDEF GpStreams_ClassHelpers}
 { TGpStreamEnhancer }
+
+procedure TGpStreamEnhancer.Advance(deltaPosition: int64);
+begin
+  Position := Position + deltaPosition;
+end; { TGpStreamEnhancer.Advance }
 
 ///<summary>Appends full contents of the source stream to the end of Self.
 ///   <para>Uses CopyStream instead of CopyFrom to support TGpScatteredStream.</para></summary>
@@ -2381,6 +2419,12 @@ begin
   WriteWideStr(#13#10);
 end; { TGpStreamEnhancer.WritelnWide }
 
+procedure TGpStreamEnhancer.WriteRawStr(const s: RawByteString);
+begin
+  if s <> '' then
+    Write(s[1], Length(s));
+end; { TGpStreamEnhancer.WriteRawStr }
+
 {:Writes tagged stream.
 }
 procedure TGpStreamEnhancer.WriteTag(tag: integer; data: TStream; startAt: int64);
@@ -2542,5 +2586,70 @@ begin
   if FPosition > newSize then
     FPosition := newSize;
 end; { TAnsiStringStream.SetSize }
+
+{ TRawByteStringStream }
+
+constructor TRawByteStringStream.Create(const value: RawByteString);
+begin
+  inherited Create;
+  FDataString := value;
+end; { TRawByteStringStream.Create }
+
+function TRawByteStringStream.Read(var buffer; count: longint): longint;
+begin
+  Result := Length(FDataString) - FPosition;
+  if Result > count then
+    Result := count;
+  if Result > 0 then
+    Move(FDataString[FPosition+1], buffer, Result);
+  Inc(FPosition, Result);
+end; { TRawByteStringStream.Read }
+
+function TRawByteStringStream.Write(const buffer; count: longint): longint;
+begin
+  Result := count;
+  SetLength(FDataString, (FPosition + Result));
+  if Result > 0 then
+    Move(buffer, FDataString[FPosition+1], Result);
+  Inc(FPosition, Result);
+end; { TRawByteStringStream.Write }
+
+function TRawByteStringStream.Seek(offset: longint; origin: word): longint;
+begin
+  case origin of
+    soFromBeginning: FPosition := offset;
+    soFromCurrent: FPosition := FPosition + offset;
+    soFromEnd: FPosition := Length(FDataString) - offset;
+  end;
+  if FPosition > Length(FDataString) then
+    FPosition := Length(FDataString)
+  else if FPosition < 0 then
+    FPosition := 0;
+  Result := FPosition;
+end; { TRawByteStringStream.Seek }
+
+function TRawByteStringStream.ReadString(count: longint): RawByteString;
+var
+  len: integer;
+begin
+  len := Length(FDataString) - FPosition;
+  if len > count then
+    len := count;
+  SetLength(Result, len);
+  if len > 0 then
+    Read(Result[1], len);
+end; { TRawByteStringStream.ReadString }
+
+procedure TRawByteStringStream.WriteString(const value: RawByteString);
+begin
+  Write(PAnsiChar(value)^, Length(value));
+end; { TRawByteStringStream.WriteString }
+
+procedure TRawByteStringStream.SetSize(newSize: longint);
+begin
+  SetLength(FDataString, newSize);
+  if FPosition > newSize then
+    FPosition := newSize;
+end; { TRawByteStringStream.SetSize }
 
 end.

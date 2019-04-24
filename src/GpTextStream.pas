@@ -10,7 +10,7 @@ unit GpTextStream;
 
 This software is distributed under the BSD license.
 
-Copyright (c) 2012, Primoz Gabrijelcic
+Copyright (c) 2018, Primoz Gabrijelcic
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification,
@@ -36,11 +36,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
    Author           : Primoz Gabrijelcic
    Creation date    : 2001-07-17
-   Last modification: 2012-03-12
-   Version          : 1.10
+   Last modification: 2018-04-18
+   Version          : 1.11a
    </pre>
 *)(*
    History:
+     1.11a: 2018-04-18
+       - Fixed pointer manipulation in 64-bit code.
+     1.11: 2018-02-28
+       - Added two overloads for FilterTxt.
      1.10: 2012-03-12
        - Implemented TGpTextMemoryStream.
      1.09a: 2011-01-01
@@ -300,9 +304,12 @@ function EnumLines(strStream: TStream): TGpTextStreamEnumeratorFactory;
 {$IFDEF GTS_Anonymous}
 type
   TFilterProc = reference to function(const srcLine: string): string;
+  TFilterProcEx = reference to function(const srcLine: string; var skip: boolean): string;
 
 procedure FilterTxt(srcStream, dstStream: TStream; isUnicode: boolean; filter: TFilterProc); overload;
+procedure FilterTxt(srcStream, dstStream: TStream; isUnicode: boolean; filter: TFilterProcEx); overload;
 procedure FilterTxt(srcStream, dstStream: TGpTextStream; filter: TFilterProc); overload;
+procedure FilterTxt(srcStream, dstStream: TGpTextStream; filter: TFilterProcEx); overload;
 {$ENDIF GTS_Anonymous}
 
 implementation
@@ -557,7 +564,7 @@ end; { EnumLines }
 {$ENDIF}
 
 {$IFDEF GTS_Anonymous}
-procedure FilterTxt(srcStream, dstStream: TStream; isUnicode: boolean; filter: TFilterProc);
+procedure FilterTxt(srcStream, dstStream: TStream; isUnicode: boolean; filter: TFilterProcEx);
 var
   dstText: TGpTextStream;
   flags  : TGpTSCreateFlags;
@@ -575,10 +582,35 @@ begin
   finally FreeAndNil(srcText); end;
 end; { FilterTxt }
 
+procedure FilterTxt(srcStream, dstStream: TGpTextStream; filter: TFilterProcEx);
+var
+  outStr: string;
+  skip  : boolean;
+begin
+  while not srcStream.EOF do begin
+    skip := false;
+    outStr := filter(srcStream.Readln, skip);
+    if not skip then
+      dstStream.Writeln(outStr);
+  end;
+end; { FilterTxt }
+
+procedure FilterTxt(srcStream, dstStream: TStream; isUnicode: boolean; filter: TFilterProc);
+begin
+  FilterTxt(srcStream, dstStream, isUnicode,
+    function (const srcLine: string; var skip: boolean): string
+    begin
+      Result := filter(srcLine);
+    end);
+end; { FilterTxt }
+
 procedure FilterTxt(srcStream, dstStream: TGpTextStream; filter: TFilterProc);
 begin
-  while not srcStream.EOF do
-    dstStream.Writeln(filter(srcStream.Readln));
+  FilterTxt(srcStream, dstStream,
+    function (const srcLine: string; var skip: boolean): string
+    begin
+      Result := filter(srcLine);
+    end);
 end; { FilterTxt }
 {$ENDIF GTS_Anonymous}
 
@@ -856,7 +888,7 @@ begin
         bytesLeft := 0;
         repeat
           // at least numChar UTF-8 bytes are needed for numChar WideChars
-          bytesRead := WrappedStream.Read(pointer(integer(tmpBuf)+bytesLeft)^, numChar);
+          bytesRead := WrappedStream.Read(pointer(NativeUInt(tmpBuf)+NativeUInt(bytesLeft))^, numChar);
           bytesConv := UTF8BufToWideCharBuf(tmpBuf^, bytesRead+bytesLeft, bufPtr^, bytesLeft);
           Result := Result + bytesConv;
           if bytesRead <> numChar then // end of stream
@@ -864,7 +896,7 @@ begin
           numChar := numChar - (bytesConv div SizeOf(WideChar));
           Inc(bufPtr, bytesConv);
           if (bytesLeft > 0) and (bytesLeft < bytesRead) then
-            Move(pointer(integer(tmpBuf)+bytesRead-bytesLeft)^, tmpBuf^, bytesLeft);
+            Move(pointer(NativeUInt(tmpBuf)+NativeUInt(bytesRead)-NativeUInt(bytesLeft))^, tmpBuf^, bytesLeft);
         until numChar = 0;
       finally FreeBuffer(tmpBuf); end;
     end
